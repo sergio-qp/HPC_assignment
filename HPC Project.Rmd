@@ -1,0 +1,120 @@
+---
+title: "HPC Project"
+author: "Sergio Quintanilla"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include = FALSE}
+library(Rcpp)
+library(rbenchmark)
+library(RcppArmadillo)
+library(profvis)
+
+
+```
+
+Let's first generate a bunch of matrices to test stuff on.
+```{r}
+A=matrix(rexp(200, rate=.1), ncol=5)
+B=matrix(rexp(400, rate=.1), ncol=80)
+C=matrix(rexp(800, rate=.1), ncol=10)
+D=matrix(rexp(600, rate=.1), ncol=60)
+E=matrix(rexp(600, rate=.1), ncol=10)
+m_list = list(A,B,C,D,E)
+lapply(m_list, dim)
+
+```
+
+Now let's try comparing the most and least inefficient ways of multiplying them.
+
+```{r}
+
+pathA= function(){A%*%B%*%C%*%D%*%E}
+pathB= function(){A%*%(B%*%C)%*%D%*%E}
+
+
+benchmark(pathA(),
+          pathB(),
+          order="relative", replications=10000)
+
+
+
+
+```
+We can see some difference between the performance of the different parenthesizations.
+
+We can calculate the operations being done in both cases:
+```{r}
+length_A = 
+40* 5* 80+ 
+40* 80* 10+
+40* 10* 60+
+40* 60* 10
+
+length_B = 
+40* 5* 10+ 
+5* 80* 10+
+5* 10* 60+
+5* 60* 10
+
+c(length_A,length_B)
+
+```
+And see that path B had vastly fewer operations than A.
+
+
+Now let's try it with some RcppArmadillo functions.
+```{r}
+sourceCpp("ProjectCPPfunctions.cpp")
+
+
+benchmark(pathA(),
+          pathB(),
+          evensimpler(A,B,C,D,E),
+          simplemult(m_list),
+          basicmult(m_list),
+          order="relative", replications=10000)
+
+
+
+```
+
+Now let's try it with a vector that dictates the order multiplications should be done in.
+```{r}
+# Pattern vector
+P_vec = c(2,3,1,4,5)
+pathB()[1,1] == order_mult(m_list,P_vec)[1,1] #TRUE, incredible
+
+benchmark(pathA(),
+          pathB(),
+          evensimpler(A,B,C,D,E),
+          basicmult(m_list),
+          order_mult(m_list,P_vec),
+          order="relative", replications=10000)
+
+
+```
+
+```{r}
+profvis({
+  for (i in 1:10000){
+  order_mult(m_list,P_vec)
+  }
+})
+
+profvis({
+  for (i in 1:10000){
+  pathA()
+  }
+})
+
+```
+
+
+
+
