@@ -1,8 +1,8 @@
 ---
 title: "HPC Project"
-author: ""
+author: "Perpetually Tired"
 date: "`r Sys.Date()`"
-output: html_document
+output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
@@ -18,6 +18,7 @@ sourceCpp("ProjectCPPfunctions.cpp")
 
 
 ```
+## Setup
 
 Let's first generate a bunch of matrices to test stuff on.
 ```{r}
@@ -73,6 +74,9 @@ c(length_A,length_B,length_C)
 ```
 And see that path B had vastly fewer operations than both A and C.
 
+
+## Applying C++
+
 Now let's try it with some RcppArmadillo functions.
 ```{Rcpp, eval=F}
 // [[Rcpp::export]]
@@ -116,7 +120,7 @@ Now let's try it with a vector that dictates the order multiplications should be
 ```{r}
 # Pattern vector
 P_vec = c(2,3,1,4,5)
-pathB() == order_mult(m_list,P_vec) #TRUE, incredible
+pathB() == order_mult(m_list,P_vec) #incredible
 
 ```
 
@@ -133,7 +137,11 @@ benchmark(pathA(),
 
 ```
 
-Let's try implementing a vastly reduced version of the Hu and Shing approach, starting by making our vector of matrix dimensions.
+Pretty good overall, `simplemult` still beats it by sheer computational simplicity and speed, but it's close. Besides, `simplemult` requires writing out the multiplications by hand, like a loser.
+
+## Algorithm
+
+Let's try implementing a version of the Hu and Shing approach, starting by making our vector of matrix dimensions.
 
 ```{r}
 # extremely crude way of making said vector
@@ -145,19 +153,13 @@ vec
 
 Now lets try making said implementation.
 
+Basically, we write out our matrix dimensions as nodes and the matrices themselves as edges between them, like this:
+
 ![my cool drawing.](horrid_jpeg.jpg)
 
-Let's understand, i is from how many nodes you can draw a separation that would create a segment of length 2, or 3 or whatever, 
+We then progressively loop through chain lengths and the nodes that can produce chains that long, so for instance, for length=2, the nodes we'd use as starting points would be 1,2,3 and 4. Inside these loops, we calculate the operation cost and keep the minimum costs we find for any start and end chain. We then progressively increase the length, using the previously saved smaller calculations to get the costs of reaching larger ones.
 
-len determines how long the parenthesization chain can be, so for instance, when the length is 5, there's only 1 i, 1 situation, in which that length exists, that being, one that begins at node 1 and ends at node 6, which would basically be a straightforward multiplication of the chain.
-
-i determines your starting position, your (, 
-
-we're calculating the cost of each individual small segment and progessively using them in larger length calculations for larger parenthisizations
-
-The diagonal for our operation cost matrix should be all 0's, it doesn't cost anything for a matrix to not be multiplied.
-
-
+The diagonal for our operation cost matrix should be all 0's, it doesn't cost anything for a matrix to not be multiplied. Beyond that, we're only going to be using cells above that diagonal. Here's the function:
 ```{r}
 algorithm = function(nodes){
   n=length(nodes)-1 #how many matrices/edges we have
@@ -215,13 +217,14 @@ out$splits
 
 ```
 
-Let's draw out what our parenthesization should be now
-1 to 5= A (B C D E)
-now from 2 to 5=
+Let's draw out what our parenthesization should be from the splits matrix now:
+
+1 to 5 = 1 so (A) B C D E which we rewrite as A (B C D E)
+now from 2 to 5 = 4 so
 A ((B C D) E)
-now from 2 to 4
+now from 2 to 4 = 3
 A (((B C) D) E)
-let's try it in action
+Let's try it in action
 
 ```{r}
 pathD= function(){A%*%(((B%*%C)%*%D)%*%E)} #from function
@@ -237,8 +240,7 @@ Now the question becomes how do we convert this vector into something useable by
 
 ```{r}
 N_vec = c(2,3,4,5,1) #what our input needs to look like
-out$splits
-# what the output looks like
+out$splits # what the output looks like
 ```
 
 Let's write a function that does that.
@@ -285,8 +287,49 @@ properize = function(splits){
 properize(out$splits)
 ```
 
-
+Now let's wrap them all up in a function and see how they perform.
 ```{r}
+wrapup = function(m_list,nodes){
+    splits = algorithm(nodes)$splits #get optimal splits
+    vec = properize(splits) #clean into presentable shape
+    order_mult(m_list,vec) #perform multiplication
+}
+# wrapup(m_list,vec) #vec is our vector of nodes/dimensions
 
 ```
-A(B(C)(D)(E)))
+
+Here's something awful, the numbers are pretty close, but not exactly identical, so we end up with things like this:
+```{r}
+order_mult(m_list,P_vec)[1,1] == wrapup(m_list,vec)[1,1]
+c(order_mult(m_list,P_vec)[1,1],wrapup(m_list,vec)[1,1])
+all.equal(order_mult(m_list,P_vec), wrapup(m_list,vec))
+```
+Ha ha. Terrible.
+
+
+
+Let's compare the performace against the others.
+
+```{r}
+benchmark(pathA(),
+          pathB(),
+          pathD(),
+          simplemult(m_list),
+          basicmult(m_list),
+          order_mult(m_list,P_vec), #our ordered cpp function
+          wrapup(m_list,vec), #our fancy rolled up function
+          order="relative", replications=10000)
+```
+
+As it stands, `wrapup` was faster than the most basic straightforward multiplication, but nowhere close to the fastest. The overheads for the benefit we get from this algorithm are rather costly, and only really beat the most basic of implementations. That said, except for `simplemult` (which, again, would require you typing each matrix to be multiplied in by hand), all the other functions it lost to already had some for of parenthesization applied to it. That is to say, the function loses against any decent form of manual pre-parenthesization, but if you don't have one at all, it performs pretty well. Additionally, it's likely this overhead is compensated for in larger chains of matrices, where calculating the optimal path by hand becomes impossible and the cost for sub-optimal parenthesization grows. 
+
+
+### References
+
+1. Hu, T.C. and Shing, M.T. (1981) Computation of matrix chain products. part I, part II. [Preprint]. doi:10.21236/ada113349. 
+
+
+
+
+
+
