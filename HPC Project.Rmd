@@ -1,6 +1,6 @@
 ---
 title: "HPC Project"
-author: "Sergio Quintanilla"
+author: ""
 date: "`r Sys.Date()`"
 output: html_document
 ---
@@ -14,6 +14,7 @@ library(Rcpp)
 library(rbenchmark)
 library(RcppArmadillo)
 library(profvis)
+sourceCpp("ProjectCPPfunctions.cpp")
 
 
 ```
@@ -30,23 +31,22 @@ lapply(m_list, dim)
 
 ```
 
-Now let's try comparing the most and least inefficient ways of multiplying them.
+Now let's try comparing the default way, a pretty alright way, and a terrible way of multiplying them.
 
 ```{r}
 
-pathA= function(){A%*%B%*%C%*%D%*%E}
-pathB= function(){A%*%(B%*%C)%*%D%*%E}
+pathA= function(){A%*%B%*%C%*%D%*%E} #standard order
+pathB= function(){A%*%(B%*%C)%*%D%*%E} #pretty good
+pathC= function(){(A%*%B)%*%(C%*%D)%*%E} #very innefficient
 
 
 benchmark(pathA(),
           pathB(),
+          pathC(),
           order="relative", replications=10000)
 
-
-
-
 ```
-We can see some difference between the performance of the different parenthesizations.
+We can see a good amount of difference between the three paths, particularly between the most and least efficient, with the default path performing a little worse than the fastest.
 
 We can calculate the operations being done in both cases:
 ```{r}
@@ -57,27 +57,55 @@ length_A =
 40* 60* 10
 
 length_B = 
-40* 5* 10+ 
+40* 5* 80+ 
 5* 80* 10+
 5* 10* 60+
 5* 60* 10
 
-c(length_A,length_B)
+length_C = 
+40* 5* 80+ 
+40* 80* 60+
+80* 10* 60+
+40* 60* 10
+
+c(length_A,length_B,length_C)
 
 ```
-And see that path B had vastly fewer operations than A.
-
+And see that path B had vastly fewer operations than both A and C.
 
 Now let's try it with some RcppArmadillo functions.
-```{r}
-sourceCpp("ProjectCPPfunctions.cpp")
+```{Rcpp, eval=F}
+// [[Rcpp::export]]
+mat basicmult(List X) {
+  mat out = as<arma::mat>(X[0]);
+  for (int i = 1; i<X.size();i++){ //start at 1 so we can skip out 0 starting index
+    out =out*as<arma::mat>(X[i]);
+  }
+  return out;
+}
 
+// [[Rcpp::export]]
+mat simplemult(List X) {
+  mat out = as<arma::mat>(X[0]) * as<arma::mat>(X[1]) * as<arma::mat>(X[2]) * as<arma::mat>(X[3]) * as<arma::mat>(X[4]);
+  return out;
+}
+
+// [[Rcpp::export]]
+mat evensimpler(const arma::mat A,const arma::mat B,const arma::mat C,const arma::mat D,const arma::mat E) {
+  mat out = A * B * C * D * E;
+  return out;
+}
+```
+
+
+```{r}
 
 benchmark(pathA(),
           pathB(),
-          evensimpler(A,B,C,D,E),
-          simplemult(m_list),
-          basicmult(m_list),
+          pathC(),
+          evensimpler(A,B,C,D,E), #basic * operations in a row
+          simplemult(m_list), #vector selecting and * in a row
+          basicmult(m_list), #loop through vector in order and multiply
           order="relative", replications=10000)
 
 
@@ -88,33 +116,177 @@ Now let's try it with a vector that dictates the order multiplications should be
 ```{r}
 # Pattern vector
 P_vec = c(2,3,1,4,5)
-pathB()[1,1] == order_mult(m_list,P_vec)[1,1] #TRUE, incredible
+pathB() == order_mult(m_list,P_vec) #TRUE, incredible
 
+```
+
+
+```{r}
 benchmark(pathA(),
           pathB(),
-          evensimpler(A,B,C,D,E),
+          pathC(),
+          simplemult(m_list),
           basicmult(m_list),
-          order_mult(m_list,P_vec),
+          order_mult(m_list,P_vec), #our ordered cpp function
           order="relative", replications=10000)
 
 
 ```
 
-```{r}
-profvis({
-  for (i in 1:10000){
-  order_mult(m_list,P_vec)
-  }
-})
+Let's try implementing a vastly reduced version of the Hu and Shing approach, starting by making our vector of matrix dimensions.
 
-profvis({
-  for (i in 1:10000){
-  pathA()
+```{r}
+# extremely crude way of making said vector
+vec = c()
+vec=sapply(m_list,dim)[1,]
+vec[6]=10
+vec
+```
+
+Now lets try making said implementation.
+
+![my cool drawing.](horrid_jpeg.jpg)
+
+Let's understand, i is from how many nodes you can draw a separation that would create a segment of length 2, or 3 or whatever, 
+
+len determines how long the parenthesization chain can be, so for instance, when the length is 5, there's only 1 i, 1 situation, in which that length exists, that being, one that begins at node 1 and ends at node 6, which would basically be a straightforward multiplication of the chain.
+
+i determines your starting position, your (, 
+
+we're calculating the cost of each individual small segment and progessively using them in larger length calculations for larger parenthisizations
+
+The diagonal for our operation cost matrix should be all 0's, it doesn't cost anything for a matrix to not be multiplied.
+
+
+```{r}
+algorithm = function(nodes){
+  n=length(nodes)-1 #how many matrices/edges we have
+  costs = matrix(0, n, n) #cost matrix, storing operation cost of each parenthesization
+  splits = matrix(0, n, n)  # split matrix stores the optimal split point for the i to j line
+
+  # first, we loop through all the possible chain lengths greater than 1 for our matrix set,
+  # for us starting at 2 and going up to 5 (which would just be the pathA parenthesization)
+  # len-1 tells you how many multiplications are going to happen inside these parentheses
+  # because our matrices are the actual chains/edges and the nodes are just their dimensions,
+  # len tells you how many matrices are being multiplied, 2,3,4 or 5, for us
+  
+  for (len in 2:n) {
+    
+    # then, within each length, we loop through all the nodes that, if set as starting node,
+    # could produce a chain of the length set in the above loop
+    # our i's are the ( of our parenthesis
+    
+    for (i in 1:(n - len + 1)){
+      j <- i + len - 1 
+      costs[i, j] <- Inf #if you don't set it to inf, you can't identify minimums progressively later
+      
+      # next, you're looping through all your K+1s, which are your possible "joining" nodes
+      # for the multiplication of your i and j nodes
+      # for example, if youre multiplying node 1 (40) with node 5 (60), as your joining node,
+      # you could have 2,3 or 4, 5,80, or 10, but you still have to account for the cost
+      # of being able to use a specific joining node when you choose one.
+      for (k in i:(j - 1)) {
+        #the operation of cost multiplying your leftmost and rightmost nodes,
+        # along with a joining middle one, your k+1
+        # the idea is to loop through the possible join nodes and see the cost of each one
+        edge_cost = nodes[i] * nodes[k + 1] * nodes[j + 1] 
+        
+        #the operation cost of the matrices between the leftmost and rightmost
+        # if the inner cost[i,j] is longer than 1, you're using the saved minimum cost of getting
+        # here from prior loops, that's why it goes smaller to larger, to use those saved smaller
+        # costs in the calculation of larger ones.
+        path_cost = costs[i, k] + costs[k + 1, j]
+        
+        # we then combine the cost of the outermost nodes plus their joining node, and the path it
+        # takes to reach that joining node, and see how it compares
+        cost = path_cost + edge_cost
+        if (cost < costs[i, j]) {
+          costs[i, j] = cost
+          splits[i, j] = k  # this is what we need for a parenthesizatino vector at the end
+          }
+        } #looping thru k's
+      } #looping thru i's 
+    } #looping through lens
+    return(list(costs = costs, splits = splits))
   }
-})
+out = algorithm(vec)
+out$costs
+out$splits
 
 ```
 
+Let's draw out what our parenthesization should be now
+1 to 5= A (B C D E)
+now from 2 to 5=
+A ((B C D) E)
+now from 2 to 4
+A (((B C) D) E)
+let's try it in action
+
+```{r}
+pathD= function(){A%*%(((B%*%C)%*%D)%*%E)} #from function
+
+benchmark(pathD(),
+          pathB(),
+          order="relative", replications=10000)
+
+```
+
+The parenthesization we get from the algorithm is vastly faster than even our previously fastest path.
+Now the question becomes how do we convert this vector into something useable by our C++ function?
+
+```{r}
+N_vec = c(2,3,4,5,1) #what our input needs to look like
+out$splits
+# what the output looks like
+```
+
+Let's write a function that does that.
+```{r}
+properize = function(splits){
+    out = c() #outvector
+    d=5 #to loop through out
+    matlist = c(1:5) #to keep track of matrices
+    sets = NULL # to store subsequent parentheses
+    init_split_point = splits[1,5] #should be ncol, but keeping it simple
+    for (i in 1:nrow(splits)){ #loop thru rows
+    # print(i)
+      for (j in ncol(splits):i){ #counting backwards, working to shorter splits, capped by our row
+        split = splits[i,j]
+        # print(j)
+        if(j==i){split =i}
+                
+        if(i!=j)out[d] = split+1 else {out[d] = split}
+        d = d-1
+        
+        
+        # all to check if we need to move to the next row
+        
+        right_set = matlist[split+1:j]
+        left_set = matlist[i:split]
+        if (sum(left_set==1) == 1){ #if i is in left set, that's the i_set, if not, its right
+            i_set = left_set
+        } else { i_set = right_set}
+        
+        if (length(i_set) == 1){
+            d = d+1
+            out[d] = out[d]-1
+            d = d-1
+            break # go to next i, u need to go deeper, basically
+        }
+        
+        if (d==-1){break}
+        }
+    if (d==-1){break}
+    }
+    # print(out)
+    out
+  }
+properize(out$splits)
+```
 
 
+```{r}
 
+```
+A(B(C)(D)(E)))
